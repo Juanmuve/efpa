@@ -121,6 +121,11 @@ body{overflow-x:hidden}
 .ap-pw{flex:1;height:4px;background:rgba(255,255,255,.3);border-radius:100px;cursor:pointer}
 .ap-pb{height:100%;background:var(--al);border-radius:100px;pointer-events:none}
 .ap-info{font-size:11px;opacity:.7;text-align:center;margin-top:6px}
+.ap-voice{width:100%;margin-top:8px;background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.25);color:#fff;border-radius:8px;padding:6px 8px;font-size:12px;font-family:inherit}
+.ap-voice option{color:#111}
+/* Resaltado del párrafo que se está leyendo */
+.tt-on{background:linear-gradient(90deg,rgba(212,175,55,.28),rgba(212,175,55,.10));border-left:3px solid var(--al);padding-left:10px;margin-left:-13px;border-radius:0 6px 6px 0;transition:background .2s}
+tr.tt-on td{background:rgba(212,175,55,.22)!important}
 
 /* CASES */
 .ccase{background:var(--card);border-radius:var(--r);box-shadow:var(--sh);margin-bottom:14px;overflow:hidden}
@@ -620,16 +625,14 @@ function openMod(b){
   rv.style.display='block';
   const cnt=QS.filter(q=>q.bloque===b).length;
   
-  // Prepare audio sentences (clean text for TTS)
-  audioSents=makeSents(mod.text||'');
-  audioIdx=0;audioPlay=false;
+  audioSents=[];audioIdx=0;audioPlay=false;
   
   rv.innerHTML=`
     <button class="back" onclick="closeMod()">← Módulos</button>
     <h2 style="font-size:19px;font-weight:800;color:var(--p);margin-bottom:12px">${mod.title||BN[b]}</h2>
     
     <div class="ap" id="ap">
-      <div class="ap-title">🎧 Audiolibro — ${audioSents.length} fragmentos</div>
+      <div class="ap-title">🎧 Audiolibro <span id="ap-count"></span></div>
       <div class="ap-text" id="ap-text">Pulsa ▶ para escuchar el libro en voz alta</div>
       <div class="ap-ctrl">
         <button class="ap-btn" onclick="audioPrev()" title="Anterior">
@@ -644,7 +647,8 @@ function openMod(b){
         <button class="ap-spd" onclick="cycleSpd()" id="ap-spd">1.0x</button>
         <div class="ap-pw" onclick="audioSeek(event,this)"><div class="ap-pb" id="ap-pb" style="width:0%"></div></div>
       </div>
-      <div class="ap-info" id="ap-info">1 / ${audioSents.length}</div>
+      <div class="ap-info" id="ap-info">—</div>
+      <select class="ap-voice" id="ap-voice" onchange="setVoice(this.value)"></select>
     </div>
     
     <div class="th-content" id="th-txt">${formatTh(mod.text||'')}</div>
@@ -657,6 +661,14 @@ function openMod(b){
         <button class="btn ba sm" onclick="startQuiz('module10','${b}')">Test rápido (10q)</button>
       </div>
     </div>`;
+  // El audio se construye a partir del texto YA RENDERIZADO, para que cada
+  // fragmento leído corresponda exactamente a un párrafo visible en pantalla.
+  buildTTS(document.getElementById('th-txt'));
+  const c=document.getElementById('ap-count');
+  if(c)c.textContent='· '+audioSents.length+' fragmentos';
+  const inf=document.getElementById('ap-info');
+  if(inf)inf.textContent=audioSents.length?('1 / '+audioSents.length):'Sin texto que leer';
+  fillVoices();
   window.scrollTo(0,0);
 }
 
@@ -713,70 +725,51 @@ function cleanTTS(t){
   x=x.replace(/\s{2,}/g,' ').trim();
   return x;
 }
-function makeSents(raw){
-  if(!raw)return[];
-  // Start from first chapter (skip ToC)
-  const h2pos=raw.search(/\n## /);
-  const content=h2pos>=0?raw.slice(h2pos+1):raw;
-
-  const sents=[];
-  const lines=content.split('\n');
-  let paraBuf='';
-
-  const flushPara=()=>{
-    const t=paraBuf.trim();
-    paraBuf='';
-    if(t.length<25)return;
-    // Skip formula-like text (sounds terrible in TTS)
-    if(t.includes('=')&&t.length<150&&!/[A-Za-záéíóúÁÉÍÓÚ]{12,}/.test(t))return;
-    const ss=splitIntoSents(t);
-    if(ss.length)sents.push(...ss);
-    else if(t.length>=25)sents.push(t);
-  };
-
-  for(const line of lines){
-    const l=line.trim();
-    if(!l){flushPara();continue;}
-
-    // Chapter headers → spoken as "Capítulo: Title"
-    if(/^## /.test(l)){
-      flushPara();
-      const title=l.slice(3).replace(/^Cap[íi]tulo\s*\d+[.:]/i,'').trim();
-      if(title.length>3)sents.push('Tema: '+title+'.');
-      continue;
+function buildTTS(root){
+  audioSents=[];
+  if(!root)return;
+  root.querySelectorAll('.tt-on').forEach(e=>e.classList.remove('tt-on'));
+  const bloques=root.querySelectorAll('h2,h3,h4,p,li,tr,blockquote');
+  let empezado=false;
+  bloques.forEach(el=>{
+    // Saltamos el índice inicial: empezamos en el primer título de capítulo
+    if(!empezado){
+      if(el.tagName==='H2')empezado=true; else return;
     }
-    // Section headers → "Sección: Title"
-    if(/^### /.test(l)){
-      flushPara();
-      const title=l.slice(4).replace(/^\d+(\.\d+)*[.\s]*/,'').trim();
-      if(title.length>4)sents.push('Sección: '+title+'.');
-      continue;
+    if(el.tagName==='TR'){
+      const celdas=[...el.querySelectorAll('td')].map(c=>c.textContent.trim()).filter(x=>x);
+      if(!celdas.length)return;
+      const tabla=el.closest('table');
+      const cabs=tabla?[...tabla.querySelectorAll('th')].map(c=>c.textContent.trim()):[];
+      const txt=celdas.map((c,k)=>(cabs.length>1&&cabs[k])?cabs[k]+': '+c:c).join('. ');
+      if(txt.length>2)audioSents.push({el:el,txt:txt});
+      return;
     }
-    // Sub-section headers
-    if(/^#### /.test(l)){
-      flushPara();
-      const title=l.slice(5).replace(/^\d+(\.\d+)*[.\s]*/,'').trim();
-      if(title.length>4)sents.push(title+'.');
-      continue;
+    if(el.closest('tr'))return;          // ya leído dentro de su fila
+    if(el.closest('li')&&el.tagName==='P')return;
+    const raw=el.textContent.replace(/\s+/g,' ').trim();
+    if(raw.length<3)return;
+    // Fórmulas sueltas: suenan fatal leídas en voz alta
+    if(raw.includes('=')&&raw.length<140&&!/[A-Za-záéíóúÁÉÍÓÚ]{12,}/.test(raw))return;
+    if(/^H[234]$/.test(el.tagName)){
+      audioSents.push({el:el,txt:raw.replace(/^\d+(\.\d+)*[.\s]*/,'')+'.',cab:true});
+      return;
     }
-    // Bullet lines → add as individual sentences
-    if(/^[-•*►→✓✗◾▸▶]\s/.test(l)){
-      flushPara();
-      const clean=l.replace(/^[-•*►→✓✗◾▸▶]\s*/,'').trim();
-      if(clean.length>=25)sents.push(clean+(clean.endsWith('.')||clean.endsWith(':')? '':'.'));
-      continue;
-    }
-    // Skip markdown table rows and separators (unreadable aloud)
-    if(/^\|/.test(l)||/^[-:| ]+$/.test(l)){flushPara();continue;}
-    // Skip index-like short numbered lines (ToC remnants)
-    if(l.length<50&&/^\d{1,2}\s+[A-ZÁÉÍÓÚ]/.test(l))continue;
-    // Accumulate in paragraph
-    paraBuf+=(paraBuf?' ':'')+l;
-  }
-  flushPara();
-  return sents;
+    const partes=splitIntoSents(raw);
+    if(partes.length>1){partes.forEach(p=>audioSents.push({el:el,txt:p}))}
+    else audioSents.push({el:el,txt:raw});
+  });
 }
 
+function marcaFragmento(k){
+  const f=audioSents[k];if(!f||!f.el)return;
+  document.querySelectorAll('.tt-on').forEach(e=>{if(e!==f.el)e.classList.remove('tt-on')});
+  f.el.classList.add('tt-on');
+  const r=f.el.getBoundingClientRect();
+  if(r.top<140||r.bottom>window.innerHeight-40){
+    f.el.scrollIntoView({block:'center',behavior:'smooth'});
+  }
+}
 function escH(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>').replace(/(^|[\s(])\*([^*\n]{2,60})\*(?=[\s.,;:)]|$)/g,'$1<em>$2</em>').replace(/`([^`]+)`/g,'<code>$1</code>').replace(/\[\[([^\]]+)\]\]/g,'$1')}
 
 function mdTable(lines){
@@ -889,6 +882,34 @@ function formatTh(raw){
 }
 
 // ===== AUDIO =====
+let vozSel=localStorage.getItem('efpa_voz')||'';
+function setVoice(uri){vozSel=uri;localStorage.setItem('efpa_voz',uri);if(audioPlay){window.speechSynthesis.cancel();speakNext()}}
+// Puntúa las voces: las de mejor calidad (Google en Android, Mónica o mejoradas
+// en iOS) van primero; las comprimidas de sistema, al final.
+function puntuaVoz(v){
+  const n=(v.name||'').toLowerCase();let p=0;
+  if(n.includes('google'))p+=50;
+  if(n.includes('mónica')||n.includes('monica')||n.includes('paulina')||n.includes('jorge'))p+=40;
+  if(n.includes('enhanced')||n.includes('premium')||n.includes('neural')||n.includes('mejorad'))p+=35;
+  if(n.includes('siri'))p+=25;
+  if(v.lang==='es-ES')p+=20; else if((v.lang||'').startsWith('es'))p+=8;
+  if(n.includes('compact')||n.includes('espeak')||n.includes('comprimid'))p-=40;
+  return p;
+}
+function vocesES(){
+  if(!window.speechSynthesis)return[];
+  return window.speechSynthesis.getVoices().filter(v=>(v.lang||'').toLowerCase().startsWith('es'))
+    .sort((a,b)=>puntuaVoz(b)-puntuaVoz(a));
+}
+function fillVoices(){
+  const sel=document.getElementById('ap-voice');if(!sel)return;
+  const vs=vocesES();
+  if(!vs.length){sel.style.display='none';return}
+  sel.style.display='block';
+  if(!vozSel||!vs.some(v=>v.voiceURI===vozSel))vozSel=vs[0].voiceURI;
+  sel.innerHTML=vs.map(v=>`<option value="${v.voiceURI}"${v.voiceURI===vozSel?' selected':''}>🔊 ${v.name} (${v.lang})</option>`).join('');
+}
+if(window.speechSynthesis)window.speechSynthesis.addEventListener('voiceschanged',fillVoices);
 function toggleAudio(){if(audioPlay)pauseAudio();else playAudio()}
 function playAudio(){
   if(!window.speechSynthesis){alert('Usa Safari en iPhone para la voz.');return}
@@ -897,43 +918,46 @@ function playAudio(){
 }
 function speakNext(){
   if(!audioPlay||audioIdx>=audioSents.length){
-    if(audioIdx>=audioSents.length){audioPlay=false;audioIdx=0;updAudioUI()}return;
+    if(audioIdx>=audioSents.length){
+      audioPlay=false;audioIdx=0;updAudioUI();
+      document.querySelectorAll('.tt-on').forEach(e=>e.classList.remove('tt-on'));
+    }
+    return;
   }
-  // Clean utterance text: strip leading emoji (added for chapter labels)
-  const rawSent=audioSents[audioIdx];
-  const uttText=cleanTTS(rawSent.replace(/^[^\w¿¡áéíóúÁÉÍÓÚüÜñÑ]+/,'')).trim();
-  const u=new SpeechSynthesisUtterance(uttText||rawSent);
-  u.lang='es-ES';u.rate=audioRate;u.pitch=1.0;
-  // Prefer local Spanish voice; on iOS the built-in Monica/Mónica voice is excellent
-  const vs=window.speechSynthesis.getVoices();
-  const v=vs.find(v=>v.lang==='es-ES'&&v.localService)
-    ||vs.find(v=>v.lang==='es-ES')
-    ||vs.find(v=>v.lang.startsWith('es')&&v.localService)
-    ||vs.find(v=>v.lang.startsWith('es'));
+  const frag=audioSents[audioIdx];
+  const texto=cleanTTS(frag.txt).trim();
+  if(!texto){audioIdx++;speakNext();return}
+  const u=new SpeechSynthesisUtterance(texto);
+  u.lang='es-ES';u.rate=frag.cab?audioRate*0.94:audioRate;u.pitch=frag.cab?1.06:1.0;
+  const vs=vocesES();
+  const v=vs.find(x=>x.voiceURI===vozSel)||vs[0];
   if(v)u.voice=v;
   u.onstart=()=>{
+    marcaFragmento(audioIdx);
     const el=document.getElementById('ap-text');
-    if(el){const d=rawSent.replace(/\*\*/g,'');el.textContent=d.length>160?d.slice(0,157)+'…':d;}
+    if(el){const d=frag.txt;el.textContent=d.length>170?d.slice(0,167)+'…':d}
     updAudioProg();
     const info=document.getElementById('ap-info');
     if(info)info.textContent=`${audioIdx+1} / ${audioSents.length}`;
   };
-  u.onend=()=>{if(audioPlay){audioIdx++;speakNext()}};
-  u.onerror=(e)=>{if(e.error!=='interrupted'&&e.error!=='cancelled'){audioIdx++;if(audioPlay)speakNext()}};
+  // Pequeña pausa entre fragmentos: se respira y deja de sonar a ametralladora
+  u.onend=()=>{if(audioPlay){audioIdx++;const esp=frag.cab?420:170;setTimeout(()=>{if(audioPlay)speakNext()},esp)}};
+  u.onerror=(e)=>{if(e.error!=='interrupted'&&e.error!=='canceled'&&e.error!=='cancelled'){audioIdx++;if(audioPlay)speakNext()}};
   window.speechSynthesis.speak(u);
 }
 function pauseAudio(){audioPlay=false;window.speechSynthesis.cancel();updAudioUI()}
-function stopAudio(){audioPlay=false;audioIdx=0;if(window.speechSynthesis)window.speechSynthesis.cancel()}
-function audioRst(){pauseAudio();audioIdx=0;updAudioProg();const el=document.getElementById('ap-text');if(el)el.textContent='Pulsa ▶ para escuchar';const info=document.getElementById('ap-info');if(info)info.textContent=`1 / ${audioSents.length}`}
+function limpiaMarca(){document.querySelectorAll('.tt-on').forEach(e=>e.classList.remove('tt-on'))}
+function stopAudio(){audioPlay=false;audioIdx=0;if(window.speechSynthesis)window.speechSynthesis.cancel();limpiaMarca()}
+function audioRst(){pauseAudio();limpiaMarca();audioIdx=0;updAudioProg();const el=document.getElementById('ap-text');if(el)el.textContent='Pulsa ▶ para escuchar';const info=document.getElementById('ap-info');if(info)info.textContent=`1 / ${audioSents.length}`}
 function audioPrev(){
   audioIdx=Math.max(0,audioIdx-1);
   if(audioPlay){window.speechSynthesis.cancel();speakNext();}
-  else{updAudioProg();const el=document.getElementById('ap-text');if(el&&audioSents[audioIdx]){const t=audioSents[audioIdx];el.textContent=t.length>150?t.slice(0,147)+'…':t;}const info=document.getElementById('ap-info');if(info)info.textContent=`${audioIdx+1} / ${audioSents.length}`;}
+  else{updAudioProg();marcaFragmento(audioIdx);const el=document.getElementById('ap-text');if(el&&audioSents[audioIdx]){const t=audioSents[audioIdx].txt;el.textContent=t.length>150?t.slice(0,147)+'…':t;}const info=document.getElementById('ap-info');if(info)info.textContent=`${audioIdx+1} / ${audioSents.length}`;}
 }
 function audioSkip(){
   audioIdx=Math.min(audioIdx+1,audioSents.length-1);
   if(audioPlay){window.speechSynthesis.cancel();speakNext()}
-  else{updAudioProg();const el=document.getElementById('ap-text');if(el&&audioSents[audioIdx]){const t=audioSents[audioIdx];el.textContent=t.length>150?t.slice(0,147)+'…':t;}const info=document.getElementById('ap-info');if(info)info.textContent=`${audioIdx+1} / ${audioSents.length}`;}
+  else{updAudioProg();marcaFragmento(audioIdx);const el=document.getElementById('ap-text');if(el&&audioSents[audioIdx]){const t=audioSents[audioIdx].txt;el.textContent=t.length>150?t.slice(0,147)+'…':t;}const info=document.getElementById('ap-info');if(info)info.textContent=`${audioIdx+1} / ${audioSents.length}`;}
 }
 function cycleSpd(){
   spdIdx=(spdIdx+1)%SPEEDS.length;audioRate=SPEEDS[spdIdx];
@@ -944,6 +968,7 @@ function audioSeek(e,el){
   const r=el.getBoundingClientRect();
   audioIdx=Math.min(audioSents.length-1,Math.max(0,Math.round((e.clientX-r.left)/r.width*audioSents.length)));
   if(audioPlay){window.speechSynthesis.cancel();speakNext()}
+  else marcaFragmento(audioIdx);
   updAudioProg();
 }
 function updAudioUI(){

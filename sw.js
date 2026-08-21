@@ -2,7 +2,7 @@
    Guarda la app en el dispositivo para que funcione SIN CONEXIÓN.
    Al publicar una versión nueva, sube el número de VERSION. */
 
-const VERSION = 'efpa-efa-v1';
+const VERSION = 'efpa-efa-v42';
 const ARCHIVOS = [
   './',
   './index.html',
